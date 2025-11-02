@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <style>
+    html, body, #cesiumContainer {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <script>
+    Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIxZDFhZTI5OS0zNTA5LTQ5NjgtOWYzZi1jYWRmZjhjOGQ5NzgiLCJpZCI6MzUzMTM3LCJpYXQiOjE3NjE4NTQ4MDh9.j7spUK_a3OJ_cnjL-KosmmMgPZMcq5lfrqlmND27Vf0';
+
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+      globe: false,
+      skyAtmosphere: new Cesium.SkyAtmosphere()
+    });
+
+    Cesium.Cesium3DTileset.fromIonAssetId(2275207)
+      .then(function(tileset) {
+        viewer.scene.primitives.add(tileset);
+        tileset.maximumScreenSpaceError = 16;
+        tileset.maximumMemoryUsage = 512;
+      })
+      .catch(function(error) {
+        console.log('Error loading tileset:', error);
+      });
+
+    setTimeout(function() {
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(-81.773, 26.4628, 5000),
+        duration: 2
+      });
+    }, 1000);
+
+  </script>
+</body>
+</html>
