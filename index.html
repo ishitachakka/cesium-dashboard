@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <title>FGCU Soil Health Digital Twin</title>
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
   <style>
@@ -11,36 +12,197 @@
       margin: 0;
       padding: 0;
       overflow: hidden;
+      font-family: -apple-system, sans-serif;
+    }
+
+    #panel {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      background: rgba(32, 32, 32, 0.85);
+      color: #eee;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      max-width: 260px;
+    }
+
+    #panel h3 {
+      margin: 0 0 8px 0;
+      font-size: 14px;
+    }
+
+    #panel label {
+      display: block;
+      margin: 4px 0;
+      cursor: pointer;
+    }
+
+    .swatch {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      margin-right: 6px;
+      border-radius: 2px;
+      vertical-align: middle;
+    }
+
+    #status {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #aaa;
     }
   </style>
 </head>
 <body>
   <div id="cesiumContainer"></div>
+
+  <div id="panel">
+    <h3>FGCU Soil Health Digital Twin</h3>
+    <label><input type="checkbox" id="toggle-points" checked> Sampling points (72)</label>
+    <label><input type="checkbox" id="toggle-ssurgo" checked> SSURGO soil classes</label>
+    <label><input type="checkbox" id="toggle-fdep"> FDEP land use/cover</label>
+    <div id="legend"></div>
+    <div id="status">loading...</div>
+  </div>
+
   <script>
+    // Backend serving the real GeoJSON layers -- see backend/main.py.
+    // Run it with: uvicorn main:app --port 8000 (from the backend/ folder)
+    const API_BASE = "http://localhost:8000";
+
     Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIxZDFhZTI5OS0zNTA5LTQ5NjgtOWYzZi1jYWRmZjhjOGQ5NzgiLCJpZCI6MzUzMTM3LCJpYXQiOjE3NjE4NTQ4MDh9.j7spUK_a3OJ_cnjL-KosmmMgPZMcq5lfrqlmND27Vf0';
 
     const viewer = new Cesium.Viewer('cesiumContainer', {
       globe: false,
       skyAtmosphere: new Cesium.SkyAtmosphere()
+      // Timeline/animation widgets are on by default (not disabled here) --
+      // left in place as the slot for the historical-to-forecast time
+      // slider once that model exists. Nothing drives them yet.
     });
 
+    // Real FGCU campus 3D tileset (photogrammetry/terrain mesh uploaded to
+    // your Cesium Ion account) -- this was already working before any of
+    // this dashboard work, kept exactly as-is.
     Cesium.Cesium3DTileset.fromIonAssetId(2275207)
-      .then(function(tileset) {
+      .then(function (tileset) {
         viewer.scene.primitives.add(tileset);
         tileset.maximumScreenSpaceError = 16;
         tileset.maximumMemoryUsage = 512;
       })
-      .catch(function(error) {
+      .catch(function (error) {
         console.log('Error loading tileset:', error);
       });
 
-    setTimeout(function() {
+    setTimeout(function () {
       viewer.camera.flyTo({
         destination: Cesium.Cartesian3.fromDegrees(-81.773, 26.4628, 5000),
         duration: 2
       });
     }, 1000);
 
+    // ---- Real data layers from backend/main.py --------------------------
+
+    // One color per landscape stratum, matching Ross's cLHS sampling design
+    // doc (6 strata, 12 points each). Keep in sync if the stratum names in
+    // point_features_master.csv ever change.
+    const STRATUM_COLORS = {
+      "Forested wetland": Cesium.Color.fromCssColorString("#2e7d32"),
+      "Natural upland": Cesium.Color.fromCssColorString("#8d6e63"),
+      "Managed campus/residential": Cesium.Color.fromCssColorString("#1976d2"),
+      "Hydric transition": Cesium.Color.fromCssColorString("#00acc1"),
+      "Herbaceous wetland": Cesium.Color.fromCssColorString("#9ccc65"),
+      "Open/disturbed/solar": Cesium.Color.fromCssColorString("#fbc02d"),
+    };
+    const DEFAULT_COLOR = Cesium.Color.WHITE;
+
+    function buildLegend() {
+      const el = document.getElementById("legend");
+      el.innerHTML = "";
+      for (const [stratum, color] of Object.entries(STRATUM_COLORS)) {
+        const row = document.createElement("div");
+        const swatch = document.createElement("span");
+        swatch.className = "swatch";
+        swatch.style.background = color.toCssColorString();
+        row.appendChild(swatch);
+        row.appendChild(document.createTextNode(stratum));
+        el.appendChild(row);
+      }
+    }
+    buildLegend();
+
+    function describeProperties(properties) {
+      // Cesium's PropertyBag -> plain object, filtering noisy band-stat
+      // columns so the popup stays readable; full data is still in the
+      // GeoJSON if you need it.
+      const skip = new Set();
+      const names = properties.propertyNames || Object.keys(properties);
+      let html = "<table>";
+      for (const name of names) {
+        if (/_(mean|std|min|max)$/.test(name) && !name.startsWith("kssl")) continue; // hide raw band stats
+        const value = properties[name] && properties[name].getValue ? properties[name].getValue() : properties[name];
+        if (value === null || value === undefined || value === "") continue;
+        html += `<tr><td style="font-weight:600;padding-right:8px;">${name}</td><td>${value}</td></tr>`;
+      }
+      html += "</table>";
+      return html;
+    }
+
+    let pointsDS, ssurgoDS, fdepDS;
+    const statusEl = document.getElementById("status");
+
+    async function loadLayers() {
+      try {
+        pointsDS = await Cesium.GeoJsonDataSource.load(`${API_BASE}/api/points`, { clampToGround: true });
+        for (const entity of pointsDS.entities.values) {
+          const stratum = entity.properties && entity.properties.stratum && entity.properties.stratum.getValue();
+          const color = STRATUM_COLORS[stratum] || DEFAULT_COLOR;
+          entity.point = new Cesium.PointGraphics({
+            pixelSize: 10,
+            color: color,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 1,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+          });
+          entity.description = describeProperties(entity.properties);
+        }
+        viewer.dataSources.add(pointsDS);
+
+        ssurgoDS = await Cesium.GeoJsonDataSource.load(`${API_BASE}/api/ssurgo`, {
+          stroke: Cesium.Color.WHITE,
+          fill: Cesium.Color.ORANGE.withAlpha(0.25),
+          strokeWidth: 1,
+          clampToGround: true,
+        });
+        viewer.dataSources.add(ssurgoDS);
+
+        fdepDS = await Cesium.GeoJsonDataSource.load(`${API_BASE}/api/fdep`, {
+          stroke: Cesium.Color.CYAN,
+          fill: Cesium.Color.CYAN.withAlpha(0.15),
+          strokeWidth: 1,
+          clampToGround: true,
+        });
+        fdepDS.show = false; // off by default (checkbox starts unchecked) -- overlaps SSURGO visually
+        viewer.dataSources.add(fdepDS);
+
+        statusEl.textContent = `loaded: ${pointsDS.entities.values.length} points, real SSURGO + FDEP polygons`;
+      } catch (err) {
+        statusEl.textContent = "Couldn't reach the backend at " + API_BASE + " -- is `uvicorn main:app --port 8000` running? (" + err + ")";
+        console.error(err);
+      }
+    }
+    loadLayers();
+
+    document.getElementById("toggle-points").addEventListener("change", (e) => {
+      if (pointsDS) pointsDS.show = e.target.checked;
+    });
+    document.getElementById("toggle-ssurgo").addEventListener("change", (e) => {
+      if (ssurgoDS) ssurgoDS.show = e.target.checked;
+    });
+    document.getElementById("toggle-fdep").addEventListener("change", (e) => {
+      if (fdepDS) fdepDS.show = e.target.checked;
+    });
   </script>
 </body>
 </html>
