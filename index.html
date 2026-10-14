@@ -68,9 +68,13 @@
   </div>
 
   <script>
-    // Backend serving the real GeoJSON layers -- see backend/main.py.
-    // Run it with: uvicorn main:app --port 8000 (from the backend/ folder)
-    const API_BASE = "http://localhost:8000";
+    // Data layers are pre-generated static GeoJSON files in data/ (see
+    // backend/main.py for the script that built them from the real
+    // WiSER_SoilLab tables -- re-run that export + commit data/*.geojson
+    // whenever point_features_master.csv, soil_polygons.gpkg, or
+    // fdep_lulc.gpkg change). Static files mean this deploys as a plain
+    // static site (e.g. GitHub Pages) with no server to host.
+    const DATA_BASE = "./data";
 
     Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIxZDFhZTI5OS0zNTA5LTQ5NjgtOWYzZi1jYWRmZjhjOGQ5NzgiLCJpZCI6MzUzMTM3LCJpYXQiOjE3NjE4NTQ4MDh9.j7spUK_a3OJ_cnjL-KosmmMgPZMcq5lfrqlmND27Vf0';
 
@@ -136,11 +140,12 @@
       // Cesium's PropertyBag -> plain object, filtering noisy band-stat
       // columns so the popup stays readable; full data is still in the
       // GeoJSON if you need it.
-      const skip = new Set();
       const names = properties.propertyNames || Object.keys(properties);
+      const keepEvenIfStat = new Set(["ndvi_recomputed_mean", "savi_mean"]); // meaningful single numbers, not raw band noise
       let html = "<table>";
       for (const name of names) {
-        if (/_(mean|std|min|max)$/.test(name) && !name.startsWith("kssl")) continue; // hide raw band stats
+        if (/_(std|min|max)$/.test(name) && !name.startsWith("kssl")) continue; // hide raw band std/min/max
+        if (/_mean$/.test(name) && !name.startsWith("kssl") && !keepEvenIfStat.has(name)) continue; // hide raw band means (B4_red_mean etc), keep NDVI/SAVI
         const value = properties[name] && properties[name].getValue ? properties[name].getValue() : properties[name];
         if (value === null || value === undefined || value === "") continue;
         html += `<tr><td style="font-weight:600;padding-right:8px;">${name}</td><td>${value}</td></tr>`;
@@ -154,7 +159,7 @@
 
     async function loadLayers() {
       try {
-        pointsDS = await Cesium.GeoJsonDataSource.load(`${API_BASE}/api/points`, { clampToGround: true });
+        pointsDS = await Cesium.GeoJsonDataSource.load(`${DATA_BASE}/points.geojson`, { clampToGround: true });
         for (const entity of pointsDS.entities.values) {
           const stratum = entity.properties && entity.properties.stratum && entity.properties.stratum.getValue();
           const color = STRATUM_COLORS[stratum] || DEFAULT_COLOR;
@@ -169,7 +174,7 @@
         }
         viewer.dataSources.add(pointsDS);
 
-        ssurgoDS = await Cesium.GeoJsonDataSource.load(`${API_BASE}/api/ssurgo`, {
+        ssurgoDS = await Cesium.GeoJsonDataSource.load(`${DATA_BASE}/ssurgo.geojson`, {
           stroke: Cesium.Color.WHITE,
           fill: Cesium.Color.ORANGE.withAlpha(0.25),
           strokeWidth: 1,
@@ -177,7 +182,7 @@
         });
         viewer.dataSources.add(ssurgoDS);
 
-        fdepDS = await Cesium.GeoJsonDataSource.load(`${API_BASE}/api/fdep`, {
+        fdepDS = await Cesium.GeoJsonDataSource.load(`${DATA_BASE}/fdep.geojson`, {
           stroke: Cesium.Color.CYAN,
           fill: Cesium.Color.CYAN.withAlpha(0.15),
           strokeWidth: 1,
@@ -188,7 +193,7 @@
 
         statusEl.textContent = `loaded: ${pointsDS.entities.values.length} points, real SSURGO + FDEP polygons`;
       } catch (err) {
-        statusEl.textContent = "Couldn't reach the backend at " + API_BASE + " -- is `uvicorn main:app --port 8000` running? (" + err + ")";
+        statusEl.textContent = "Couldn't load the data files from " + DATA_BASE + " -- (" + err + ")";
         console.error(err);
       }
     }
