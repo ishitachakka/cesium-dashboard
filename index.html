@@ -26,6 +26,8 @@
       border-radius: 8px;
       font-size: 13px;
       max-width: 260px;
+      max-height: 86vh;
+      overflow-y: auto;
     }
 
     #panel h3 {
@@ -101,6 +103,34 @@
       margin: 6px 0 2px 0;
     }
 
+    .health-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 10px;
+      margin: 1px 4px 1px 0;
+    }
+
+    .completeness-row {
+      font-size: 11px;
+      color: #ccc;
+      margin: 4px 0 6px 0;
+    }
+
+    .legend-title {
+      font-size: 11px;
+      color: #aaa;
+      margin: 0 0 4px 0;
+    }
+
+    .legend-section {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
     #timelineNote {
       position: absolute;
       bottom: 32px;
@@ -133,7 +163,25 @@
     <label><input type="checkbox" id="toggle-points" checked> Sampling points (72)</label>
     <label><input type="checkbox" id="toggle-ssurgo" checked> SSURGO soil classes</label>
     <label><input type="checkbox" id="toggle-fdep"> FDEP land use/cover</label>
-    <div id="legend"></div>
+    <label><input type="checkbox" id="toggle-cells"> 10x10m sampling cells (real cLHS unit)</label>
+    <label><input type="checkbox" id="toggle-gridzones"> Prediction zones -- coming soon</label>
+
+    <div style="margin: 8px 0 4px 0;">
+      <label for="color-mode" style="display:inline;">Color points by:</label>
+      <select id="color-mode" style="margin-left: 4px;">
+        <option value="stratum">Landscape stratum</option>
+        <option value="health">Soil health (pH / OC / bulk density)</option>
+      </select>
+    </div>
+
+    <div class="legend-section">
+      <div class="legend-title">Landscape stratum</div>
+      <div id="legend"></div>
+    </div>
+    <div class="legend-section" id="healthLegend">
+      <div class="legend-title">Soil health (general reference bands -- not FL-specific NRCS data yet)</div>
+      <div id="healthLegendBody"></div>
+    </div>
     <div id="fieldStatusLegend">
       <div class="legend-title">Field sampling status (updated 2026-10-19)</div>
       <div id="fieldStatusLegendBody"></div>
@@ -229,6 +277,33 @@
     }
     buildFieldStatusLegend();
 
+    // General-reference health bands (pH / organic carbon / bulk density) --
+    // NOT county-specific NRCS thresholds, see add_health_classification.py
+    // in WiSER_SoilLab for the exact cutoffs and the same honesty caveat.
+    // insufficient_data = none of the 3 KSSL-derived inputs were available.
+    const HEALTH_COLORS = {
+      healthy:            { color: Cesium.Color.fromCssColorString("#43a047"), label: "Healthy" },
+      moderate:           { color: Cesium.Color.fromCssColorString("#fdd835"), label: "Moderate" },
+      poor:               { color: Cesium.Color.fromCssColorString("#e53935"), label: "Poor" },
+      insufficient_data:  { color: Cesium.Color.fromCssColorString("#757575"), label: "Insufficient data" },
+    };
+
+    function buildHealthLegend() {
+      const el = document.getElementById("healthLegendBody");
+      el.innerHTML = "";
+      for (const key of ["healthy", "moderate", "poor", "insufficient_data"]) {
+        const info = HEALTH_COLORS[key];
+        const row = document.createElement("div");
+        const swatch = document.createElement("span");
+        swatch.className = "swatch";
+        swatch.style.background = info.color.toCssColorString();
+        row.appendChild(swatch);
+        row.appendChild(document.createTextNode(info.label));
+        el.appendChild(row);
+      }
+    }
+    buildHealthLegend();
+
     function buildLegend() {
       const el = document.getElementById("legend");
       el.innerHTML = "";
@@ -256,6 +331,8 @@
       const names = properties.propertyNames || Object.keys(properties);
       const keepEvenIfStat = new Set(["ndvi_recomputed_mean", "savi_mean"]); // meaningful single numbers, not raw band noise
       const fieldStatusCols = new Set(["field_status", "field_status_label", "field_notes", "field_actual_lon", "field_actual_lat"]);
+      const healthCols = new Set(["health_ph_class", "health_oc_class", "health_bd_class", "health_overall", "health_score"]);
+      const completenessCols = new Set(["source_ssurgo", "source_fdep", "source_kssl", "source_sentinel", "data_completeness_n", "data_completeness_label"]);
 
       let html = "";
 
@@ -276,10 +353,36 @@
         }
       }
 
+      // Soil health badges -- general reference bands, not FL-specific NRCS
+      // thresholds yet (see add_health_classification.py in WiSER_SoilLab).
+      const healthOverall = getProp(properties, "health_overall");
+      if (healthOverall) {
+        const hInfo = HEALTH_COLORS[healthOverall] || HEALTH_COLORS.insufficient_data;
+        html += '<div class="popup-section-label">Soil health (reference bands, not FL-specific yet)</div>';
+        html += `<div class="health-badge" style="background:${hInfo.color.withAlpha(0.22).toCssColorString()};border:1px solid ${hInfo.color.toCssColorString()};">Overall: ${hInfo.label}</div><br>`;
+        for (const [col, prefix] of [["health_ph_class", "pH"], ["health_oc_class", "Organic carbon"], ["health_bd_class", "Bulk density"]]) {
+          const cls = getProp(properties, col);
+          if (!cls) continue;
+          const info = HEALTH_COLORS[cls] || HEALTH_COLORS.insufficient_data;
+          html += `<div class="health-badge" style="background:${info.color.withAlpha(0.18).toCssColorString()};border:1px solid ${info.color.toCssColorString()};">${prefix}: ${info.label}</div>`;
+        }
+      }
+
+      // Data completeness -- which of the 4 real sources this point actually has.
+      const completenessLabel = getProp(properties, "data_completeness_label");
+      if (completenessLabel) {
+        const parts = [];
+        for (const [col, label] of [["source_ssurgo", "SSURGO"], ["source_fdep", "FDEP"], ["source_kssl", "KSSL"], ["source_sentinel", "Sentinel-2"]]) {
+          const has = getProp(properties, col);
+          parts.push(`${has ? "\u2713" : "\u2717"} ${label}`);
+        }
+        html += `<div class="completeness-row">${completenessLabel}: ${parts.join(" &nbsp; ")}</div>`;
+      }
+
       html += '<div class="popup-section-label">Observed data (real SSURGO / FDEP / KSSL / satellite)</div>';
       html += "<table>";
       for (const name of names) {
-        if (fieldStatusCols.has(name)) continue; // already shown in the banner above
+        if (fieldStatusCols.has(name) || healthCols.has(name) || completenessCols.has(name)) continue; // already shown above
         if (/_(std|min|max)$/.test(name) && !name.startsWith("kssl")) continue; // hide raw band std/min/max
         if (/_mean$/.test(name) && !name.startsWith("kssl") && !keepEvenIfStat.has(name)) continue; // hide raw band means (B4_red_mean etc), keep NDVI/SAVI
         const value = getProp(properties, name);
@@ -290,26 +393,39 @@
       return html;
     }
 
-    let pointsDS, ssurgoDS, fdepDS;
+    let pointsDS, ssurgoDS, fdepDS, cellsDS, gridZonesDS;
+    let colorMode = "stratum";
     const statusEl = document.getElementById("status");
+
+    // Re-colors the already-loaded points without re-fetching GeoJSON --
+    // called on initial load and whenever the "Color points by" select changes.
+    function applyPointColors() {
+      if (!pointsDS) return;
+      for (const entity of pointsDS.entities.values) {
+        const stratum = entity.properties && entity.properties.stratum && entity.properties.stratum.getValue();
+        const health = entity.properties && entity.properties.health_overall && entity.properties.health_overall.getValue();
+        const fieldStatus = entity.properties && entity.properties.field_status && entity.properties.field_status.getValue();
+        const statusInfo = FIELD_STATUS[fieldStatus] || FIELD_STATUS.pending;
+        const fillColor = colorMode === "health"
+          ? (HEALTH_COLORS[health] || HEALTH_COLORS.insufficient_data).color
+          : (STRATUM_COLORS[stratum] || DEFAULT_COLOR);
+        entity.point = new Cesium.PointGraphics({
+          pixelSize: statusInfo === FIELD_STATUS.pending ? 10 : 12,
+          color: fillColor,
+          outlineColor: statusInfo.color,
+          outlineWidth: statusInfo.width,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        });
+      }
+    }
 
     async function loadLayers() {
       try {
         pointsDS = await Cesium.GeoJsonDataSource.load(`${DATA_BASE}/points.geojson`, { clampToGround: true });
         for (const entity of pointsDS.entities.values) {
-          const stratum = entity.properties && entity.properties.stratum && entity.properties.stratum.getValue();
-          const color = STRATUM_COLORS[stratum] || DEFAULT_COLOR;
-          const fieldStatus = entity.properties && entity.properties.field_status && entity.properties.field_status.getValue();
-          const statusInfo = FIELD_STATUS[fieldStatus] || FIELD_STATUS.pending;
-          entity.point = new Cesium.PointGraphics({
-            pixelSize: statusInfo === FIELD_STATUS.pending ? 10 : 12,
-            color: color,
-            outlineColor: statusInfo.color,
-            outlineWidth: statusInfo.width,
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-          });
           entity.description = describeProperties(entity.properties);
         }
+        applyPointColors();
         viewer.dataSources.add(pointsDS);
 
         ssurgoDS = await Cesium.GeoJsonDataSource.load(`${DATA_BASE}/ssurgo.geojson`, {
@@ -329,6 +445,38 @@
         fdepDS.show = false; // off by default (checkbox starts unchecked) -- overlaps SSURGO visually
         viewer.dataSources.add(fdepDS);
 
+        // The real cLHS sampling unit (10x10m) around each point -- this is
+        // the literal cell Ross confirmed the design uses, NOT Cesium's
+        // default click-selection indicator (that's just UI chrome, no data
+        // behind it). Off by default so it doesn't clutter the first view.
+        cellsDS = await Cesium.GeoJsonDataSource.load(`${DATA_BASE}/cell_outlines.geojson`, {
+          stroke: Cesium.Color.WHITE.withAlpha(0.9),
+          fill: Cesium.Color.WHITE.withAlpha(0.03),
+          strokeWidth: 1,
+          clampToGround: true,
+        });
+        cellsDS.show = false;
+        viewer.dataSources.add(cellsDS);
+
+        // Placeholder zones for the future campus-wide prediction grid --
+        // geometry only, no predictions in it yet (the U-Net/Prithvi models
+        // are trained on the 72 points, not run across the grid yet). Off by
+        // default, and each zone's popup says plainly that it's a placeholder.
+        gridZonesDS = await Cesium.GeoJsonDataSource.load(`${DATA_BASE}/grid_zones.geojson`, {
+          stroke: Cesium.Color.GRAY,
+          fill: Cesium.Color.GRAY.withAlpha(0.12),
+          strokeWidth: 1,
+          clampToGround: true,
+        });
+        for (const entity of gridZonesDS.entities.values) {
+          const stratum = entity.properties && entity.properties.stratum && entity.properties.stratum.getValue();
+          entity.description = `<div class="popup-section-label">Not yet a real prediction</div>` +
+            `<div style="font-size:12px;">Placeholder zone for ${stratum || "this stratum"} -- the campus-wide ` +
+            `prediction grid isn't computed yet (models are trained on the 72 real points only so far).</div>`;
+        }
+        gridZonesDS.show = false;
+        viewer.dataSources.add(gridZonesDS);
+
         statusEl.textContent = `loaded: ${pointsDS.entities.values.length} points, real SSURGO + FDEP polygons`;
       } catch (err) {
         statusEl.textContent = "Couldn't load the data files from " + DATA_BASE + " -- (" + err + ")";
@@ -345,6 +493,16 @@
     });
     document.getElementById("toggle-fdep").addEventListener("change", (e) => {
       if (fdepDS) fdepDS.show = e.target.checked;
+    });
+    document.getElementById("toggle-cells").addEventListener("change", (e) => {
+      if (cellsDS) cellsDS.show = e.target.checked;
+    });
+    document.getElementById("toggle-gridzones").addEventListener("change", (e) => {
+      if (gridZonesDS) gridZonesDS.show = e.target.checked;
+    });
+    document.getElementById("color-mode").addEventListener("change", (e) => {
+      colorMode = e.target.value;
+      applyPointColors();
     });
   </script>
 </body>
